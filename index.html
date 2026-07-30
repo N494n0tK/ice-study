@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>氷が溶けるまで勉強する</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧊</text></svg>">
+</head>
+<body data-status="idle">
+
+<header>
+  <h1>氷が溶けるまで勉強する</h1>
+  <p class="tagline">氷がぜんぶ溶けたら、きょうの勉強はおしまい。</p>
+</header>
+
+<main>
+  <div class="stage">
+    <canvas id="scene"></canvas>
+    <div class="time-wrap" id="timeWrap">
+      <div id="timeDisplay">25:00</div>
+      <div id="cubeInfo">氷 5個</div>
+    </div>
+    <div id="doneMsg" hidden>
+      <p class="done-title">おつかれさまでした</p>
+      <p class="done-sub">氷がぜんぶ溶けました</p>
+    </div>
+  </div>
+
+  <section id="setupPanel" class="panel">
+    <p class="hint">氷1個 = 5分。時間が長いほど、大きな瓶にたくさんの氷が入ります。</p>
+    <div class="presets" id="presets">
+      <button data-min="15">15分</button>
+      <button data-min="25" class="selected">25分</button>
+      <button data-min="30">30分</button>
+      <button data-min="45">45分</button>
+      <button data-min="60">60分</button>
+      <button data-min="90">90分</button>
+      <button data-min="120">120分</button>
+    </div>
+    <label class="custom-label">じぶんで決める
+      <input id="customMin" type="number" min="1" max="240" step="1" placeholder="25"> 分
+    </label>
+    <button id="startBtn" class="primary">はじめる</button>
+  </section>
+
+  <section id="runPanel" class="panel">
+    <button id="pauseBtn">❄ 冷凍庫に戻す</button>
+    <button id="resetBtn">リセット</button>
+  </section>
+
+  <section class="panel settings">
+    <label class="toggle"><input type="checkbox" id="showTimeToggle" checked><span>残り時間を表示</span></label>
+    <label class="toggle"><input type="checkbox" id="rainToggle"><span>雨の音</span></label>
+    <label class="toggle vol"><span>音量</span><input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.5"></label>
+    <label class="toggle"><input type="checkbox" id="notifyToggle"><span>終わったら通知</span></label>
+  </section>
+</main>
+
+<footer>
+  <p>タブを閉じても氷は溶け続けます。止めたいときは「冷凍庫に戻す」。</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
