@@ -23,10 +23,10 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 28px 16px 24px;
+  padding: 26px 20px 22px;
 }
 
-header { text-align: center; margin-bottom: 14px; }
+header { text-align: center; margin-bottom: 16px; }
 
 h1 {
   font-size: 1.45rem;
@@ -42,59 +42,35 @@ h1 {
   letter-spacing: 0.08em;
 }
 
-main {
+/* ---- two-column layout (PC) ---- */
+
+.layout {
   width: 100%;
-  max-width: 440px;
+  max-width: 860px;
   display: flex;
-  flex-direction: column;
-  gap: 14px;
+  gap: 22px;
+  align-items: stretch;
 }
 
 /* ---- stage ---- */
 
 .stage {
   position: relative;
-  width: 100%;
-  aspect-ratio: 3 / 4;
+  flex: 1 1 55%;
+  min-width: 0;
+  aspect-ratio: 5 / 8;
+  max-height: 78vh;
   border-radius: 20px;
   overflow: hidden;
   background:
-    radial-gradient(90% 70% at 50% 30%, rgba(90, 130, 180, 0.18), transparent 70%),
+    radial-gradient(90% 60% at 50% 26%, rgba(90, 130, 180, 0.18), transparent 70%),
     linear-gradient(180deg, rgba(20, 32, 54, 0.9), rgba(14, 18, 30, 0.95));
   box-shadow:
     inset 0 0 60px rgba(0, 0, 0, 0.45),
     0 10px 40px rgba(0, 0, 0, 0.35);
 }
 
-#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-
-.time-wrap {
-  position: absolute;
-  top: 14px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  pointer-events: none;
-}
-
-#timeDisplay {
-  font-variant-numeric: tabular-nums;
-  font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
-  font-size: 2.3rem;
-  font-weight: 300;
-  letter-spacing: 0.06em;
-  color: rgba(220, 236, 250, 0.92);
-  text-shadow: 0 0 18px rgba(120, 180, 230, 0.4);
-}
-
-#cubeInfo {
-  margin-top: 2px;
-  font-size: 0.8rem;
-  color: var(--ink-dim);
-  letter-spacing: 0.12em;
-}
-
-body.hide-time #timeDisplay { display: none; }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; }
 
 #doneMsg {
   position: absolute;
@@ -111,12 +87,20 @@ body.hide-time #timeDisplay { display: none; }
 
 #doneMsg[hidden] { display: none; }
 
-.done-title { font-size: 1.5rem; letter-spacing: 0.18em; text-shadow: 0 0 22px rgba(159, 208, 232, 0.5); }
-.done-sub { font-size: 0.9rem; color: var(--ink-dim); letter-spacing: 0.1em; }
+.done-title { font-size: 1.4rem; letter-spacing: 0.18em; text-shadow: 0 0 22px rgba(159, 208, 232, 0.5); }
+.done-sub { font-size: 0.85rem; color: var(--ink-dim); letter-spacing: 0.1em; }
 
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-/* ---- panels ---- */
+/* ---- side column ---- */
+
+.side {
+  flex: 1 1 45%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 
 .panel {
   background: var(--panel);
@@ -128,58 +112,71 @@ body.hide-time #timeDisplay { display: none; }
   gap: 12px;
 }
 
-.hint { font-size: 0.78rem; color: var(--ink-dim); line-height: 1.6; }
+.readout { align-items: center; gap: 2px; padding: 18px 16px; }
 
-.presets { display: flex; flex-wrap: wrap; gap: 8px; }
+#timeDisplay {
+  font-variant-numeric: tabular-nums;
+  font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 2.6rem;
+  font-weight: 300;
+  letter-spacing: 0.06em;
+  color: rgba(220, 236, 250, 0.92);
+  text-shadow: 0 0 18px rgba(120, 180, 230, 0.4);
+}
+
+#cubeInfo {
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+  letter-spacing: 0.12em;
+}
+
+body.hide-time #timeDisplay { display: none; }
+
+.hint { font-size: 0.76rem; color: var(--ink-dim); line-height: 1.6; }
 
 button {
   font-family: inherit;
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: var(--ink);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(159, 208, 232, 0.25);
   border-radius: 10px;
-  padding: 8px 14px;
+  padding: 9px 14px;
   cursor: pointer;
   letter-spacing: 0.05em;
   transition: background 0.15s, border-color 0.15s, transform 0.05s;
 }
 
-button:hover { background: rgba(159, 208, 232, 0.15); }
-button:active { transform: scale(0.97); }
+button:hover:not(:disabled) { background: rgba(159, 208, 232, 0.15); }
+button:active:not(:disabled) { transform: scale(0.97); }
+button:disabled { opacity: 0.4; cursor: default; }
 
-.presets button.selected {
-  background: rgba(159, 208, 232, 0.25);
-  border-color: var(--accent);
-  color: #fff;
+button.big {
+  font-size: 1.05rem;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: linear-gradient(180deg, rgba(120, 180, 225, 0.28), rgba(80, 140, 195, 0.22));
+  border-color: rgba(159, 208, 232, 0.4);
 }
 
-.custom-label { font-size: 0.82rem; color: var(--ink-dim); display: flex; align-items: center; gap: 8px; }
-
-#customMin {
-  width: 70px;
-  font-family: inherit;
-  font-size: 0.9rem;
-  color: var(--ink);
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  padding: 6px 8px;
-  text-align: center;
+button.big .sub {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  letter-spacing: 0.1em;
 }
 
 button.primary {
   font-size: 1rem;
-  padding: 12px;
+  padding: 13px;
   background: linear-gradient(180deg, rgba(120, 180, 225, 0.4), rgba(80, 140, 195, 0.35));
   border-color: rgba(159, 208, 232, 0.5);
   letter-spacing: 0.2em;
 }
 
-button.primary:hover { background: linear-gradient(180deg, rgba(140, 195, 235, 0.5), rgba(95, 155, 205, 0.45)); }
-
-#runPanel { flex-direction: row; }
-#runPanel button { flex: 1; padding: 12px; }
+button.primary:hover:not(:disabled) { background: linear-gradient(180deg, rgba(140, 195, 235, 0.5), rgba(95, 155, 205, 0.45)); }
 
 /* panel visibility by app status */
 #setupPanel, #runPanel { display: none; }
@@ -190,8 +187,6 @@ body[data-status="done"] #runPanel { display: flex; }
 body[data-status="done"] #pauseBtn { display: none; }
 
 /* ---- settings ---- */
-
-.settings { flex-direction: row; flex-wrap: wrap; gap: 10px 18px; }
 
 .toggle {
   display: flex;
@@ -205,8 +200,15 @@ body[data-status="done"] #pauseBtn { display: none; }
 
 .toggle input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
-.toggle.vol { flex: 1; min-width: 130px; }
 .toggle.vol input[type="range"] { flex: 1; accent-color: var(--accent); height: 3px; }
 
 footer { margin-top: 18px; text-align: center; }
 footer p { font-size: 0.72rem; color: rgba(141, 155, 176, 0.65); letter-spacing: 0.06em; }
+
+/* ---- narrow screens: stack ---- */
+
+@media (max-width: 720px) {
+  .layout { flex-direction: column; align-items: center; }
+  .stage { width: 100%; flex: none; }
+  .side { max-width: none; width: 100%; }
+}

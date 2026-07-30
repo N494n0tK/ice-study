@@ -14,47 +14,40 @@
   <p class="tagline">氷がぜんぶ溶けたら、きょうの勉強はおしまい。</p>
 </header>
 
-<main>
+<main class="layout">
   <div class="stage">
     <canvas id="scene"></canvas>
-    <div class="time-wrap" id="timeWrap">
-      <div id="timeDisplay">25:00</div>
-      <div id="cubeInfo">氷 5個</div>
-    </div>
     <div id="doneMsg" hidden>
       <p class="done-title">おつかれさまでした</p>
       <p class="done-sub">氷がぜんぶ溶けました</p>
     </div>
   </div>
 
-  <section id="setupPanel" class="panel">
-    <p class="hint">氷1個 = 5分。時間が長いほど、大きな瓶にたくさんの氷が入ります。</p>
-    <div class="presets" id="presets">
-      <button data-min="15">15分</button>
-      <button data-min="25" class="selected">25分</button>
-      <button data-min="30">30分</button>
-      <button data-min="45">45分</button>
-      <button data-min="60">60分</button>
-      <button data-min="90">90分</button>
-      <button data-min="120">120分</button>
+  <aside class="side">
+    <div class="readout panel">
+      <div id="timeDisplay">0:00</div>
+      <div id="cubeInfo">氷 0個</div>
     </div>
-    <label class="custom-label">じぶんで決める
-      <input id="customMin" type="number" min="1" max="240" step="1" placeholder="25"> 分
-    </label>
-    <button id="startBtn" class="primary">はじめる</button>
-  </section>
 
-  <section id="runPanel" class="panel">
-    <button id="pauseBtn">❄ 冷凍庫に戻す</button>
-    <button id="resetBtn">リセット</button>
-  </section>
+    <section id="setupPanel" class="panel">
+      <button id="addBtn" class="big">🧊 氷を入れる<span class="sub">+5分</span></button>
+      <button id="removeBtn">− ひとつ戻す</button>
+      <p class="hint">氷1個 = 5分。瓶には24個まで入ります(最長2時間)。</p>
+      <button id="startBtn" class="primary" disabled>はじめる</button>
+    </section>
 
-  <section class="panel settings">
-    <label class="toggle"><input type="checkbox" id="showTimeToggle" checked><span>残り時間を表示</span></label>
-    <label class="toggle"><input type="checkbox" id="rainToggle"><span>雨の音</span></label>
-    <label class="toggle vol"><span>音量</span><input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.5"></label>
-    <label class="toggle"><input type="checkbox" id="notifyToggle"><span>終わったら通知</span></label>
-  </section>
+    <section id="runPanel" class="panel">
+      <button id="pauseBtn">❄ 冷凍庫に戻す</button>
+      <button id="resetBtn">リセット</button>
+    </section>
+
+    <section class="panel settings">
+      <label class="toggle"><input type="checkbox" id="showTimeToggle" checked><span>残り時間を表示</span></label>
+      <label class="toggle"><input type="checkbox" id="rainToggle"><span>雨の音</span></label>
+      <label class="toggle vol"><span>音量</span><input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.5"></label>
+      <label class="toggle"><input type="checkbox" id="notifyToggle"><span>終わったら通知</span></label>
+    </section>
+  </aside>
 </main>
 
 <footer>
