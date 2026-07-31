@@ -273,7 +273,7 @@ function spawnCube(drop) {
     z: Math.random(),
     rot: (Math.random() - 0.5) * 0.55,
     type: Math.floor(Math.random() * 4),
-    sizeMul: 0.85 + Math.random() * 0.3,
+    sizeMul: 0.98 + Math.random() * 0.22,
     seed: Math.random() * Math.PI * 2,
     meltP: 0,
     landed: !drop,
@@ -460,126 +460,56 @@ function drawCracks(c, s, seed, alpha) {
   c.stroke();
 }
 
-// type 0: classic cube with a visible top face
-function drawIceCube(c, s, p, seed, t, soften, alpha) {
-  const h = s / 2;
+// all designs are squarish blocks; wMul/hMul vary the proportions and
+// roundBase softens the corners slightly per variant
+function drawIceRect(c, s, p, seed, t, soften, alpha, wMul, hMul, roundBase) {
+  const w = s * wMul, hgt = s * hMul;
   const round = Math.max(p, soften * 0.35);
-  const rb = s * (0.1 + 0.4 * round);
-  const wob = ph => Math.max(1, Math.min(h, rb * (1 + 0.3 * Math.sin(t * 0.5 + seed + ph))));
+  const rb = s * (roundBase + 0.38 * round);
+  const wob = ph => Math.max(1, Math.min(Math.min(w, hgt) / 2, rb * (1 + 0.28 * Math.sin(t * 0.5 + seed + ph))));
   const radii = [wob(0), wob(1.7), wob(3.1), wob(4.6)];
-  // top face
-  const d = s * 0.26;
+  // top face (fades away as the cube melts round)
+  const d = s * 0.24;
   c.globalAlpha = alpha * (1 - p) * 0.85;
   c.fillStyle = 'rgba(238, 251, 255, 0.55)';
   c.beginPath();
-  c.moveTo(-h + radii[0] * 0.4, -h);
-  c.lineTo(h - radii[1] * 0.4, -h);
-  c.lineTo(h - radii[1] * 0.4 - s * 0.1, -h - d);
-  c.lineTo(-h + radii[0] * 0.4 + s * 0.16, -h - d);
+  c.moveTo(-w / 2 + radii[0] * 0.4, -hgt / 2);
+  c.lineTo(w / 2 - radii[1] * 0.4, -hgt / 2);
+  c.lineTo(w / 2 - radii[1] * 0.4 - s * 0.1, -hgt / 2 - d);
+  c.lineTo(-w / 2 + radii[0] * 0.4 + s * 0.16, -hgt / 2 - d);
   c.closePath();
   c.fill();
   c.globalAlpha = alpha;
   // front face
   c.fillStyle = iceFill(c, s, 1);
-  c.beginPath(); c.roundRect(-h, -h, s, s, radii); c.fill();
+  c.beginPath(); c.roundRect(-w / 2, -hgt / 2, w, hgt, radii); c.fill();
+  // inner bright core
   c.fillStyle = 'rgba(238, 250, 255, 0.16)';
-  c.beginPath(); c.roundRect(-h * 0.62, -h * 0.62, s * 0.62, s * 0.62, rb * 0.7); c.fill();
+  c.beginPath(); c.roundRect(-w * 0.31, -hgt * 0.31, w * 0.62, hgt * 0.62, rb * 0.7); c.fill();
+  // specular on the top edge
   c.strokeStyle = 'rgba(255, 255, 255, 0.55)';
   c.lineWidth = 1.3;
-  c.beginPath(); c.moveTo(-h + radii[0] * 0.8, -h + 1.2); c.lineTo(h * 0.55, -h + 1.2); c.stroke();
-  drawCracks(c, s, seed, 1);
-}
-
-// type 1: flat-ish rectangular block
-function drawIceBlock(c, s, p, seed, t, soften, alpha) {
-  const w = s * 1.16, hgt = s * 0.82;
-  const round = Math.max(p, soften * 0.35);
-  const rb = s * (0.1 + 0.38 * round);
-  const d = s * 0.22;
-  c.globalAlpha = alpha * (1 - p) * 0.8;
-  c.fillStyle = 'rgba(238, 251, 255, 0.5)';
   c.beginPath();
-  c.moveTo(-w / 2 + rb * 0.4, -hgt / 2);
-  c.lineTo(w / 2 - rb * 0.4, -hgt / 2);
-  c.lineTo(w / 2 - rb * 0.4 - s * 0.12, -hgt / 2 - d);
-  c.lineTo(-w / 2 + rb * 0.4 + s * 0.18, -hgt / 2 - d);
-  c.closePath();
-  c.fill();
-  c.globalAlpha = alpha;
-  c.fillStyle = iceFill(c, s, 1);
-  c.beginPath(); c.roundRect(-w / 2, -hgt / 2, w, hgt, rb); c.fill();
-  c.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-  c.lineWidth = 1.2;
-  c.beginPath(); c.moveTo(-w * 0.36, -hgt / 2 + 1.2); c.lineTo(w * 0.3, -hgt / 2 + 1.2); c.stroke();
-  drawCracks(c, s * 0.9, seed, 1);
-}
-
-// type 2: tumbled, well-rounded lump
-function drawIceTumbled(c, s, p, seed, t, soften, alpha) {
-  const h = s / 2;
-  const rb = s * 0.34;
-  c.globalAlpha = alpha;
-  c.fillStyle = iceFill(c, s, 1.05);
-  c.beginPath(); c.roundRect(-h, -h * 0.94, s, s * 0.94, rb); c.fill();
-  const g = c.createRadialGradient(-s * 0.15, -s * 0.18, 2, 0, 0, s * 0.6);
-  g.addColorStop(0, 'rgba(245, 252, 255, 0.4)');
-  g.addColorStop(1, 'rgba(245, 252, 255, 0)');
-  c.fillStyle = g;
-  c.beginPath(); c.roundRect(-h, -h * 0.94, s, s * 0.94, rb); c.fill();
-  c.strokeStyle = 'rgba(255, 255, 255, 0.45)';
-  c.lineWidth = 1.2;
-  c.beginPath();
-  c.arc(-s * 0.08, -s * 0.16, s * 0.3, Math.PI * 1.05, Math.PI * 1.6);
+  c.moveTo(-w / 2 + radii[0] * 0.8, -hgt / 2 + 1.2);
+  c.lineTo(w * 0.28, -hgt / 2 + 1.2);
   c.stroke();
+  drawCracks(c, Math.min(w, hgt), seed, 1);
 }
 
-// type 3: irregular faceted chunk
-function drawIceChunk(c, s, p, seed, t, soften, alpha) {
-  const n = 7;
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    const ang = (i / n) * Math.PI * 2 + seed;
-    const rad = s * 0.5 * (0.78 + 0.24 * Math.sin(seed * 3 + i * 2.4));
-    pts.push([Math.cos(ang) * rad, Math.sin(ang) * rad * 0.92]);
-  }
-  const round = 1 - Math.max(p, soften * 0.3);
-  c.globalAlpha = alpha;
-  c.fillStyle = iceFill(c, s, 1);
-  c.beginPath();
-  for (let i = 0; i < n; i++) {
-    const [x1, y1] = pts[i];
-    const [x2, y2] = pts[(i + 1) % n];
-    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-    if (i === 0) c.moveTo(mx, my);
-    else c.quadraticCurveTo(x1, y1, mx, my);
-    if (i === n - 1) c.quadraticCurveTo(pts[0][0], pts[0][1], (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2);
-  }
-  c.closePath();
-  c.fill();
-  // facet highlights
-  c.strokeStyle = `rgba(255, 255, 255, ${0.3 * round})`;
-  c.lineWidth = 0.9;
-  c.beginPath();
-  c.moveTo(pts[1][0] * 0.85, pts[1][1] * 0.85);
-  c.lineTo(pts[4][0] * 0.3, pts[4][1] * 0.3);
-  c.lineTo(pts[5][0] * 0.8, pts[5][1] * 0.8);
-  c.stroke();
-  c.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-  c.beginPath();
-  c.moveTo(pts[2][0] * 0.95, pts[2][1] * 0.95);
-  c.lineTo(pts[3][0] * 0.95, pts[3][1] * 0.95);
-  c.stroke();
-}
-
-const ICE_PAINTERS = [drawIceCube, drawIceBlock, drawIceTumbled, drawIceChunk];
+const ICE_PAINTERS = [
+  (c, s, p, sd, t, so, a) => drawIceRect(c, s, p, sd, t, so, a, 1.0, 1.0, 0.1),    // classic cube
+  (c, s, p, sd, t, so, a) => drawIceRect(c, s, p, sd, t, so, a, 1.18, 0.84, 0.1),  // flat block
+  (c, s, p, sd, t, so, a) => drawIceRect(c, s, p, sd, t, so, a, 0.86, 1.14, 0.1),  // tall block
+  (c, s, p, sd, t, so, a) => drawIceRect(c, s, p, sd, t, so, a, 1.06, 1.0, 0.17),  // soft-cornered cube
+];
 
 function drawIce(c, cu, t, soften, waterY) {
   const s = cubeSize(cu);
   if (s < 2) return;
   const p = cu.meltP;
   const fade = p > 0.9 ? (1 - p) / 0.1 : 1;
-  const depthScale = 1 - cu.z * 0.14;
-  const dim = 1 - cu.z * 0.42;
+  const depthScale = 1 - cu.z * 0.08;
+  const dim = 1 - cu.z * 0.34;
   const yv = cu.y - cu.z * JAR_R * K * 0.9;
   const r = cubeR(cu);
   const sub = Math.min(1, Math.max(0, ((cu.y + r) - waterY) / (2 * r)));
