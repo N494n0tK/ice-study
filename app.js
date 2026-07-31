@@ -3,20 +3,18 @@
 
 /* ================= CONFIG ================= */
 
-const CUBE = 46;             // front-layer cube size (scene units)
-const CELL = CUBE + 8;
-const COLS = 3, PER_LEVEL = 6;   // 3 columns x 2 depth layers per level
+const CUBE = 58;             // base ice size (scene units) — chunky
 const MAX_CUBES = 24;        // jar capacity (2 hours)
 const CUBE_MINUTES = 5;
 const K = 0.24;              // ellipse squash: viewed slightly from above
-const DENSITY = 0.9;         // floating ice: fraction of pile below waterline
-const WATER_FACTOR = 0.55;   // melted cube area -> water height scaling
+const DENSITY = 0.9;         // floating ice: fraction of height below waterline
+const WATER_FACTOR = 0.5;    // melted cube area -> water height scaling
 const STORAGE_KEY = 'iceStudy.v2';
 
 // jar geometry (scene units, y grows downward, x centered on 0)
-const JAR_R = (COLS * CELL + 28) / 2;   // inner radius
-const JAR_H = 342;                       // rim to floor
-const RIM_Y = 96;                        // leaves room above for lid lift + drops
+const JAR_R = 102;
+const JAR_H = 380;
+const RIM_Y = 96;
 const FLOOR_Y = RIM_Y + JAR_H;
 const SCENE_W = JAR_R * 2 + 90;
 const SCENE_H = FLOOR_Y + JAR_R * K + 34;
@@ -26,41 +24,6 @@ const speed = (() => {
   const v = parseFloat(new URLSearchParams(location.search).get('speed'));
   return Number.isFinite(v) && v > 0 ? v : 1;
 })();
-
-/* ================= PURE MODEL ================= */
-
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6D2B79F5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-// slot(i): cubes fill bottom-up, front row first within each level
-function slotOf(i) {
-  const level = Math.floor(i / PER_LEVEL);
-  const k = i % PER_LEVEL;
-  return { level, depth: k < COLS ? 0 : 1, col: k % COLS };
-}
-
-// Melt progress per cube. Last-added melts first (top of the pile),
-// so remaining cubes never change slots.
-function meltState(elapsedMs, totalMs, N) {
-  const cubeMs = totalMs / N;
-  const p = [];
-  for (let i = 0; i < N; i++) {
-    p.push(Math.min(1, Math.max(0, (elapsedMs - (N - 1 - i) * cubeMs) / cubeMs)));
-  }
-  const meltedFrac = Math.min(1, Math.max(0, elapsedMs / totalMs));
-  const waterH = (N * CUBE * CUBE * WATER_FACTOR * meltedFrac) / (JAR_R * 2);
-  let activeIdx = -1;
-  for (let i = 0; i < N; i++) if (p[i] > 0 && p[i] < 1) activeIdx = i;
-  const cubesLeft = p.filter(v => v < 1).length;
-  return { p, meltedFrac, waterH, activeIdx, cubesLeft };
-}
 
 /* ================= TIMER / STATE ================= */
 
@@ -72,7 +35,7 @@ let state = {
 };
 
 let prefs = {
-  cubes: 5,              // idle selection: number of cubes in the jar
+  cubes: 5,
   showTime: true,
   rain: false,
   volume: 0.5,
@@ -88,6 +51,19 @@ function elapsedMs() {
     return state.bankedMs + (Date.now() - state.lastResumeEpoch) * speed;
   }
   return state.bankedMs;
+}
+
+// melt bookkeeping: k cubes fully gone, current one at `frac`
+function meltInfo() {
+  const N = sessionCubes();
+  const cubeMs = state.totalMs / N;
+  const e = Math.min(elapsedMs(), state.totalMs);
+  const meltedFrac = state.totalMs > 0 ? e / state.totalMs : 0;
+  let k = Math.floor(e / cubeMs);
+  let frac = (e - k * cubeMs) / cubeMs;
+  if (k >= N) { k = N; frac = 0; }
+  const waterH = (N * CUBE * CUBE * WATER_FACTOR * meltedFrac) / (JAR_R * 2);
+  return { N, k, frac, meltedFrac, waterH, cubesLeft: N - k };
 }
 
 function startSession() {
@@ -122,6 +98,7 @@ function resumeSession() {
 function resetSession() {
   state = { status: 'idle', totalMs: 0, bankedMs: 0, lastResumeEpoch: 0 };
   clearEffects();
+  rebuildSim();
   save();
   syncUI();
 }
@@ -156,7 +133,6 @@ function restore() {
   if (data.prefs) prefs = { ...prefs, ...data.prefs };
   if (data.state && data.state.status && data.state.status !== 'idle') {
     state = data.state;
-    // real ice keeps melting while the tab is closed
     if (elapsedMs() >= state.totalMs) {
       state.status = 'done';
       state.bankedMs = state.totalMs;
@@ -254,7 +230,7 @@ function playClink() { blip(1900, 1100, 0.045, 0.16, 0.15); blip(2600, 1600, 0.0
 function playChime() {
   const ctx = ensureAudioCtx();
   if (!ctx) return;
-  const notes = [659.25, 880, 1046.5]; // E5 A5 C6 — soft pentatonic bell
+  const notes = [659.25, 880, 1046.5];
   notes.forEach((freq, i) => {
     const t = ctx.currentTime + i * 0.22;
     [0, 3].forEach(detune => {
@@ -273,35 +249,179 @@ function playChime() {
   });
 }
 
+/* ================= ICE PHYSICS =================
+   Each cube is simulated as a disc: gravity, buoyancy (ice floats with
+   ~90% of its height submerged), wall/floor contacts and pairwise
+   collisions solved by position relaxation. Cubes carry a random depth
+   z in [0,1]; cubes far apart in depth pass in front/behind each other,
+   which packs the jar like a real messy pile. */
+
+let simCubes = [];   // {id,x,y,vx,vy,z,rot,type,sizeMul,seed,meltP,landed}
+let nextId = 1;
+let meltingId = null;
+
+function cubeSize(cu) { return CUBE * cu.sizeMul * Math.sqrt(Math.max(0, 1 - cu.meltP)); }
+function cubeR(cu) { return cubeSize(cu) * 0.5; }
+
+function spawnCube(drop) {
+  const cu = {
+    id: nextId++,
+    x: (Math.random() * 2 - 1) * JAR_R * 0.45,
+    y: drop ? RIM_Y - 70 : RIM_Y + 60 + Math.random() * JAR_H * 0.5,
+    vx: (Math.random() - 0.5) * 60,
+    vy: drop ? 60 : 0,
+    z: Math.random(),
+    rot: (Math.random() - 0.5) * 0.55,
+    type: Math.floor(Math.random() * 4),
+    sizeMul: 0.85 + Math.random() * 0.3,
+    seed: Math.random() * Math.PI * 2,
+    meltP: 0,
+    landed: !drop,
+  };
+  simCubes.push(cu);
+  return cu;
+}
+
+function removeTopmost() {
+  if (!simCubes.length) return;
+  let top = 0;
+  for (let i = 1; i < simCubes.length; i++) {
+    if (simCubes[i].y < simCubes[top].y) top = i;
+  }
+  const [gone] = simCubes.splice(top, 1);
+  if (meltingId === gone.id) meltingId = null;
+}
+
+function stepSim(dt, waterY, t, silent) {
+  const G = 1500;
+  for (const cu of simCubes) {
+    const r = cubeR(cu);
+    // fraction of the cube's height below the waterline
+    const sub = Math.min(1, Math.max(0, ((cu.y + r) - waterY) / (2 * r)));
+    // net acceleration: zero when submerged to DENSITY (=> floats)
+    cu.vy += G * (1 - sub / DENSITY) * dt;
+    const dragK = sub > 0.05 ? 3.2 : 0.12;
+    cu.vx *= Math.exp(-dragK * dt);
+    cu.vy *= Math.exp(-dragK * dt);
+    if (sub > 0.3) {           // gentle water bobbing
+      cu.vy += Math.sin(t * 1.25 + cu.seed) * 9 * dt;
+      cu.vx += Math.sin(t * 0.7 + cu.seed * 2) * 5 * dt;
+    }
+    cu.x += cu.vx * dt;
+    cu.y += cu.vy * dt;
+  }
+
+  for (let iter = 0; iter < 2; iter++) {
+    for (const cu of simCubes) {
+      const r = cubeR(cu) * 0.96;
+      // side walls (slightly narrower for deeper cubes)
+      const maxX = JAR_R - r - 5 - cu.z * 5;
+      if (cu.x < -maxX) { cu.x = -maxX; cu.vx = Math.abs(cu.vx) * 0.3; }
+      if (cu.x > maxX) { cu.x = maxX; cu.vx = -Math.abs(cu.vx) * 0.3; }
+      // floor
+      const maxY = FLOOR_Y - 4 - r;
+      if (cu.y > maxY) {
+        cu.y = maxY;
+        if (cu.vy > 0) {
+          if (!cu.landed && cu.vy > 90 && !silent) playClink();
+          cu.landed = true;
+          cu.vy = -cu.vy * 0.12;
+        }
+      }
+    }
+    // pairwise contacts (cubes at very different depths pass each other)
+    for (let i = 0; i < simCubes.length; i++) {
+      for (let j = i + 1; j < simCubes.length; j++) {
+        const a = simCubes[i], b = simCubes[j];
+        if (Math.abs(a.z - b.z) >= 0.5) continue;
+        const minD = (cubeR(a) + cubeR(b)) * 0.9;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 >= minD * minD) continue;
+        let d = Math.sqrt(d2);
+        if (d < 0.01) { dx = (a.seed - b.seed) || 0.1; dy = -0.5; d = Math.hypot(dx, dy); }
+        const push = (minD - d) / d * 0.5;
+        a.x -= dx * push; a.y -= dy * push;
+        b.x += dx * push; b.y += dy * push;
+        const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+        const impact = Math.abs(rvx * dx / d + rvy * dy / d);
+        if ((!a.landed || !b.landed) && impact > 90 && !silent) {
+          playClink();
+          a.landed = b.landed = true;
+        }
+        a.vx *= 0.92; a.vy *= 0.92; b.vx *= 0.92; b.vy *= 0.92;
+      }
+    }
+  }
+}
+
+function presettle(waterY) {
+  for (let i = 0; i < 260; i++) stepSim(1 / 60, waterY, i / 60, true);
+  for (const cu of simCubes) cu.landed = true;
+}
+
+// rebuild the pile from scratch (page load / reset / restore)
+function rebuildSim() {
+  simCubes = [];
+  meltingId = null;
+  if (state.status === 'idle') {
+    for (let i = 0; i < prefs.cubes; i++) spawnCube(false);
+    presettle(FLOOR_Y + 999);
+  } else if (state.status === 'running' || state.status === 'paused') {
+    const m = meltInfo();
+    for (let i = 0; i < m.cubesLeft; i++) spawnCube(false);
+    presettle(FLOOR_Y - m.waterH);
+  }
+}
+
+// keep the pile in sync with the melt schedule; returns the melting cube
+function syncMelt() {
+  if (state.status === 'idle') {
+    while (simCubes.length > prefs.cubes) removeTopmost();
+    while (simCubes.length < prefs.cubes) { spawnCube(false); presettle(FLOOR_Y + 999); }
+    for (const cu of simCubes) cu.meltP = 0;
+    return null;
+  }
+  if (state.status === 'done') {
+    simCubes.length = 0;
+    return null;
+  }
+  const m = meltInfo();
+  while (simCubes.length > m.cubesLeft) removeTopmost();
+  let melting = null;
+  if (simCubes.length > 0 && m.k < m.N) {
+    melting = simCubes.find(cu => cu.id === meltingId) || null;
+    if (!melting) {
+      // the topmost cube melts first (it is the most exposed)
+      melting = simCubes.reduce((top, cu) => (cu.y < top.y ? cu : top), simCubes[0]);
+      meltingId = melting.id;
+    }
+    for (const cu of simCubes) cu.meltP = cu === melting ? m.frac : 0;
+  }
+  return melting;
+}
+
 /* ================= RENDER ================= */
 
 const canvas = document.getElementById('scene');
 const ctx2d = canvas.getContext('2d');
 
-const droplets = [];  // {x, y, vy}  falling melt drops
-const bubbles = [];   // {x, y, r}   rising in the water
-const rings = [];     // {x, start, big}  surface ripple rings
-let dropAnim = null;  // {idx, start}  cube being dropped into the jar
+const droplets = [];
+const bubbles = [];
+const rings = [];
+let dropAnimUntil = 0;   // lid stays open until this time
 let lidLift = 0;
-let seeds = [];       // per-cube random phase
 
 function clearEffects() {
   droplets.length = 0;
   bubbles.length = 0;
   rings.length = 0;
-  dropAnim = null;
-}
-
-function seedFor(i) {
-  while (seeds.length <= i) {
-    const rng = mulberry32((seeds.length + 1) * 2654435761);
-    seeds.push(rng() * Math.PI * 2);
-  }
-  return seeds[i];
+  dropAnimUntil = 0;
 }
 
 let lastDropletAt = 0;
 let lastBubbleAt = 0;
+let lastFrameT = 0;
 
 function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -319,129 +439,183 @@ function ellipse(c, x, y, rx, ry) {
   c.ellipse(x, y, rx, Math.max(0.1, ry), 0, 0, Math.PI * 2);
 }
 
-// pseudo-3D ice cube: front face + top face, melting into a rounded blob
-function drawCube3D(c, bx, by, s, p, seed, t, soften, dim) {
-  if (p >= 1 || s < 2) return;
-  const fade = (p > 0.9 ? (1 - p) / 0.1 : 1) * dim;
-  const x0 = bx - s / 2;
-  const yTop = by - s;
-  const round = Math.max(p, soften * 0.35);
-  const rb = s * (0.12 + 0.42 * round);
-  const wob = (ph) => Math.max(1, Math.min(s / 2, rb * (1 + 0.3 * Math.sin(t * 0.5 + seed + ph))));
-  const radii = [wob(0), wob(1.7), wob(3.1), wob(4.6)];
+/* ---- four ice designs, drawn centered on (0,0) ---- */
 
-  c.save();
-  c.globalAlpha = fade;
+function iceFill(c, s, alpha) {
+  const g = c.createLinearGradient(-s / 2, -s / 2, s / 2, s / 2);
+  g.addColorStop(0, `rgba(214, 238, 252, ${0.52 * alpha})`);
+  g.addColorStop(0.55, `rgba(160, 205, 235, ${0.36 * alpha})`);
+  g.addColorStop(1, `rgba(112, 162, 208, ${0.42 * alpha})`);
+  return g;
+}
 
-  // top face (fades away as the cube melts round)
-  const d = s * 0.3;
-  c.globalAlpha = fade * (1 - p) * 0.9;
-  c.fillStyle = 'rgba(235, 250, 255, 0.55)';
+function drawCracks(c, s, seed, alpha) {
+  c.strokeStyle = `rgba(255, 255, 255, ${0.15 * alpha})`;
+  c.lineWidth = 0.8;
   c.beginPath();
-  c.moveTo(x0 + radii[0] * 0.4, yTop);
-  c.lineTo(x0 + s - radii[1] * 0.4, yTop);
-  c.lineTo(x0 + s - radii[1] * 0.4 - s * 0.08, yTop - d);
-  c.lineTo(x0 + radii[0] * 0.4 + s * 0.16, yTop - d);
+  c.moveTo(-s * 0.22 + Math.sin(seed) * 4, -s * 0.15);
+  c.lineTo(s * 0.08 + Math.cos(seed * 2) * 4, s * 0.16);
+  c.moveTo(s * 0.2, -s * 0.25 + Math.sin(seed * 3) * 4);
+  c.lineTo(0, s * 0.05);
+  c.stroke();
+}
+
+// type 0: classic cube with a visible top face
+function drawIceCube(c, s, p, seed, t, soften, alpha) {
+  const h = s / 2;
+  const round = Math.max(p, soften * 0.35);
+  const rb = s * (0.1 + 0.4 * round);
+  const wob = ph => Math.max(1, Math.min(h, rb * (1 + 0.3 * Math.sin(t * 0.5 + seed + ph))));
+  const radii = [wob(0), wob(1.7), wob(3.1), wob(4.6)];
+  // top face
+  const d = s * 0.26;
+  c.globalAlpha = alpha * (1 - p) * 0.85;
+  c.fillStyle = 'rgba(238, 251, 255, 0.55)';
+  c.beginPath();
+  c.moveTo(-h + radii[0] * 0.4, -h);
+  c.lineTo(h - radii[1] * 0.4, -h);
+  c.lineTo(h - radii[1] * 0.4 - s * 0.1, -h - d);
+  c.lineTo(-h + radii[0] * 0.4 + s * 0.16, -h - d);
   c.closePath();
   c.fill();
-  c.strokeStyle = 'rgba(255,255,255,0.35)';
-  c.lineWidth = 0.8;
-  c.stroke();
-  c.globalAlpha = fade;
-
+  c.globalAlpha = alpha;
   // front face
-  const grad = c.createLinearGradient(x0, yTop, x0 + s, by);
-  grad.addColorStop(0, 'rgba(212, 236, 252, 0.5)');
-  grad.addColorStop(0.55, 'rgba(160, 205, 235, 0.36)');
-  grad.addColorStop(1, 'rgba(115, 165, 210, 0.4)');
-  c.fillStyle = grad;
-  c.beginPath();
-  c.roundRect(x0, yTop, s, s, radii);
-  c.fill();
-
-  // right-side shading for depth
-  const sideGrad = c.createLinearGradient(x0 + s * 0.7, 0, x0 + s, 0);
-  sideGrad.addColorStop(0, 'rgba(80, 120, 165, 0)');
-  sideGrad.addColorStop(1, `rgba(80, 120, 165, ${0.28 * (1 - p)})`);
-  c.fillStyle = sideGrad;
-  c.beginPath();
-  c.roundRect(x0, yTop, s, s, radii);
-  c.fill();
-
-  // inner bright core
-  c.fillStyle = 'rgba(238, 250, 255, 0.18)';
-  c.beginPath();
-  c.roundRect(x0 + s * 0.18, yTop + s * 0.18, s * 0.64, s * 0.64, rb * 0.8);
-  c.fill();
-
-  // specular on the top edge
-  c.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+  c.fillStyle = iceFill(c, s, 1);
+  c.beginPath(); c.roundRect(-h, -h, s, s, radii); c.fill();
+  c.fillStyle = 'rgba(238, 250, 255, 0.16)';
+  c.beginPath(); c.roundRect(-h * 0.62, -h * 0.62, s * 0.62, s * 0.62, rb * 0.7); c.fill();
+  c.strokeStyle = 'rgba(255, 255, 255, 0.55)';
   c.lineWidth = 1.3;
-  c.beginPath();
-  c.moveTo(x0 + radii[0] * 0.8, yTop + 1.2);
-  c.lineTo(x0 + s * 0.6, yTop + 1.2);
-  c.stroke();
+  c.beginPath(); c.moveTo(-h + radii[0] * 0.8, -h + 1.2); c.lineTo(h * 0.55, -h + 1.2); c.stroke();
+  drawCracks(c, s, seed, 1);
+}
 
-  // faint cracks
-  c.strokeStyle = 'rgba(255, 255, 255, 0.14)';
-  c.lineWidth = 0.8;
+// type 1: flat-ish rectangular block
+function drawIceBlock(c, s, p, seed, t, soften, alpha) {
+  const w = s * 1.16, hgt = s * 0.82;
+  const round = Math.max(p, soften * 0.35);
+  const rb = s * (0.1 + 0.38 * round);
+  const d = s * 0.22;
+  c.globalAlpha = alpha * (1 - p) * 0.8;
+  c.fillStyle = 'rgba(238, 251, 255, 0.5)';
   c.beginPath();
-  c.moveTo(x0 + s * (0.25 + 0.1 * Math.sin(seed)), yTop + s * 0.32);
-  c.lineTo(x0 + s * (0.55 + 0.1 * Math.cos(seed * 2)), yTop + s * 0.64);
-  c.moveTo(x0 + s * 0.7, yTop + s * (0.2 + 0.1 * Math.sin(seed * 3)));
-  c.lineTo(x0 + s * 0.5, yTop + s * 0.52);
-  c.stroke();
+  c.moveTo(-w / 2 + rb * 0.4, -hgt / 2);
+  c.lineTo(w / 2 - rb * 0.4, -hgt / 2);
+  c.lineTo(w / 2 - rb * 0.4 - s * 0.12, -hgt / 2 - d);
+  c.lineTo(-w / 2 + rb * 0.4 + s * 0.18, -hgt / 2 - d);
+  c.closePath();
+  c.fill();
+  c.globalAlpha = alpha;
+  c.fillStyle = iceFill(c, s, 1);
+  c.beginPath(); c.roundRect(-w / 2, -hgt / 2, w, hgt, rb); c.fill();
+  c.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  c.lineWidth = 1.2;
+  c.beginPath(); c.moveTo(-w * 0.36, -hgt / 2 + 1.2); c.lineTo(w * 0.3, -hgt / 2 + 1.2); c.stroke();
+  drawCracks(c, s * 0.9, seed, 1);
+}
 
+// type 2: tumbled, well-rounded lump
+function drawIceTumbled(c, s, p, seed, t, soften, alpha) {
+  const h = s / 2;
+  const rb = s * 0.34;
+  c.globalAlpha = alpha;
+  c.fillStyle = iceFill(c, s, 1.05);
+  c.beginPath(); c.roundRect(-h, -h * 0.94, s, s * 0.94, rb); c.fill();
+  const g = c.createRadialGradient(-s * 0.15, -s * 0.18, 2, 0, 0, s * 0.6);
+  g.addColorStop(0, 'rgba(245, 252, 255, 0.4)');
+  g.addColorStop(1, 'rgba(245, 252, 255, 0)');
+  c.fillStyle = g;
+  c.beginPath(); c.roundRect(-h, -h * 0.94, s, s * 0.94, rb); c.fill();
+  c.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+  c.lineWidth = 1.2;
+  c.beginPath();
+  c.arc(-s * 0.08, -s * 0.16, s * 0.3, Math.PI * 1.05, Math.PI * 1.6);
+  c.stroke();
+}
+
+// type 3: irregular faceted chunk
+function drawIceChunk(c, s, p, seed, t, soften, alpha) {
+  const n = 7;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const ang = (i / n) * Math.PI * 2 + seed;
+    const rad = s * 0.5 * (0.78 + 0.24 * Math.sin(seed * 3 + i * 2.4));
+    pts.push([Math.cos(ang) * rad, Math.sin(ang) * rad * 0.92]);
+  }
+  const round = 1 - Math.max(p, soften * 0.3);
+  c.globalAlpha = alpha;
+  c.fillStyle = iceFill(c, s, 1);
+  c.beginPath();
+  for (let i = 0; i < n; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % n];
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    if (i === 0) c.moveTo(mx, my);
+    else c.quadraticCurveTo(x1, y1, mx, my);
+    if (i === n - 1) c.quadraticCurveTo(pts[0][0], pts[0][1], (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2);
+  }
+  c.closePath();
+  c.fill();
+  // facet highlights
+  c.strokeStyle = `rgba(255, 255, 255, ${0.3 * round})`;
+  c.lineWidth = 0.9;
+  c.beginPath();
+  c.moveTo(pts[1][0] * 0.85, pts[1][1] * 0.85);
+  c.lineTo(pts[4][0] * 0.3, pts[4][1] * 0.3);
+  c.lineTo(pts[5][0] * 0.8, pts[5][1] * 0.8);
+  c.stroke();
+  c.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  c.beginPath();
+  c.moveTo(pts[2][0] * 0.95, pts[2][1] * 0.95);
+  c.lineTo(pts[3][0] * 0.95, pts[3][1] * 0.95);
+  c.stroke();
+}
+
+const ICE_PAINTERS = [drawIceCube, drawIceBlock, drawIceTumbled, drawIceChunk];
+
+function drawIce(c, cu, t, soften, waterY) {
+  const s = cubeSize(cu);
+  if (s < 2) return;
+  const p = cu.meltP;
+  const fade = p > 0.9 ? (1 - p) / 0.1 : 1;
+  const depthScale = 1 - cu.z * 0.14;
+  const dim = 1 - cu.z * 0.42;
+  const yv = cu.y - cu.z * JAR_R * K * 0.9;
+  const r = cubeR(cu);
+  const sub = Math.min(1, Math.max(0, ((cu.y + r) - waterY) / (2 * r)));
+  const wobble = sub > 0.4 ? Math.sin(t * 1.3 + cu.seed) * 0.05 : 0;
+
+  c.save();
+  c.translate(cu.x, yv);
+  c.rotate(cu.rot + wobble);
+  c.scale(depthScale, depthScale);
+  ICE_PAINTERS[cu.type](c, s, p, cu.seed, t, soften, fade * dim);
   c.restore();
+  c.globalAlpha = 1;
 }
 
 function draw(now) {
   const { w, h } = fitCanvas();
   ctx2d.clearRect(0, 0, w, h);
   const t = now / 1000;
+  const dt = Math.min(0.05, lastFrameT ? t - lastFrameT : 1 / 60);
+  lastFrameT = t;
 
-  const isIdle = state.status === 'idle';
-  const N = isIdle ? prefs.cubes : sessionCubes();
-  const melt = isIdle || N === 0
-    ? { p: new Array(N).fill(0), meltedFrac: 0, waterH: 0, activeIdx: -1, cubesLeft: N }
-    : meltState(Math.min(elapsedMs(), state.totalMs), state.totalMs, N);
+  const m = state.status === 'idle' || state.status === 'done'
+    ? { waterH: state.status === 'done' ? (sessionCubes() * CUBE * CUBE * WATER_FACTOR) / (JAR_R * 2) : 0, meltedFrac: state.status === 'done' ? 1 : 0 }
+    : meltInfo();
+  const waterY = FLOOR_Y - (m.waterH || 0);
+
+  const melting = syncMelt();
+  stepSim(dt, waterY, t, false);
 
   const scale = Math.min(w / SCENE_W, h / SCENE_H);
   const c = ctx2d;
   c.save();
   c.translate(w / 2, (h - SCENE_H * scale) / 2);
   c.scale(scale, scale);
-  // scene: x centered on 0, y from 0 (top)
 
   const R = JAR_R, ry = R * K;
-  const waterY = FLOOR_Y - melt.waterH;
-
-  /* ---- buoyant pile: rests on the floor until the water lifts it ---- */
-  const levelsLeft = Math.ceil(Math.max(melt.cubesLeft, dropAnim ? 1 : 0) / PER_LEVEL);
-  const pileH = levelsLeft * CELL;
-  let pileBottom = FLOOR_Y - 3;
-  let floating = false;
-  if (melt.waterH > 2 && melt.cubesLeft > 0) {
-    const buoyant = waterY + DENSITY * pileH;
-    if (buoyant < pileBottom) {
-      pileBottom = buoyant;
-      floating = true;
-    }
-  }
-  if (floating) {
-    pileBottom += Math.sin(t * 1.1) * 2 + Math.sin(t * 0.63 + 1.7) * 1.2;
-    pileBottom = Math.min(pileBottom, FLOOR_Y - 3);
-  }
-
-  const cubeBottomY = (i) => {
-    const { level } = slotOf(i);
-    return pileBottom - level * CELL;
-  };
-  const cubeX = (i) => {
-    const { depth, col } = slotOf(i);
-    const jitter = Math.sin(seedFor(i) * 5) * 3;
-    return (col - 1) * CELL + jitter + (depth ? 4 : 0);
-  };
 
   /* ---- glass back ---- */
   c.fillStyle = 'rgba(150, 190, 225, 0.05)';
@@ -453,7 +627,6 @@ function draw(now) {
   c.ellipse(0, RIM_Y, R, ry, 0, 0, Math.PI, false);
   c.closePath();
   c.fill();
-  // back inner wall sheen
   const backGrad = c.createLinearGradient(0, RIM_Y, 0, FLOOR_Y);
   backGrad.addColorStop(0, 'rgba(120, 165, 210, 0.07)');
   backGrad.addColorStop(1, 'rgba(60, 95, 140, 0.05)');
@@ -461,17 +634,16 @@ function draw(now) {
   ellipse(c, 0, RIM_Y, R, ry);
   c.fill();
 
-  /* ---- spawn/advance effects ---- */
-  const active = melt.activeIdx >= 0 ? melt.activeIdx : -1;
-  if (state.status === 'running' && active >= 0) {
+  /* ---- effects bookkeeping ---- */
+  if (state.status === 'running' && melting) {
     if (t - lastDropletAt > 0.55 + Math.sin(t * 1.7) * 0.4) {
       lastDropletAt = t;
-      const s = CUBE * Math.sqrt(1 - melt.p[active]);
-      droplets.push({ x: cubeX(active) + (Math.random() - 0.5) * s * 0.6, y: cubeBottomY(active) - 2, vy: 0 });
+      const s = cubeSize(melting);
+      droplets.push({ x: melting.x + (Math.random() - 0.5) * s * 0.5, y: melting.y + cubeR(melting) - 2, vy: 0 });
     }
-    if (melt.waterH > 14 && t - lastBubbleAt > 1.7) {
+    if (m.waterH > 14 && t - lastBubbleAt > 1.7) {
       lastBubbleAt = t;
-      bubbles.push({ x: (Math.random() - 0.5) * R * 1.4, y: FLOOR_Y - 6, r: 1 + Math.random() * 1.8 });
+      bubbles.push({ x: (Math.random() - 0.5) * R * 1.4, y: FLOOR_Y - 8, r: 1 + Math.random() * 1.8 });
     }
   }
   if (state.status === 'running') {
@@ -482,8 +654,8 @@ function draw(now) {
       const floor = Math.min(waterY, FLOOR_Y - 2);
       if (dp.y >= floor) {
         droplets.splice(i, 1);
-        if (melt.waterH > 3) {
-          rings.push({ x: dp.x, start: t, big: false });
+        if (m.waterH > 3) {
+          rings.push({ x: dp.x, start: t });
           if (Math.random() < 0.5) playDrip();
         }
       }
@@ -499,43 +671,20 @@ function draw(now) {
     if (t - rings[i].start > 1.8) rings.splice(i, 1);
   }
 
-  /* ---- ice cubes (clipped to the jar) ---- */
+  /* ---- ice (clipped to the jar), back cubes first ---- */
   c.save();
   c.beginPath();
-  c.moveTo(-R, RIM_Y - 40);
+  c.moveTo(-R, RIM_Y - 60);
   c.lineTo(-R, FLOOR_Y);
   c.ellipse(0, FLOOR_Y, R, ry, 0, Math.PI, 0, true);
-  c.lineTo(R, RIM_Y - 40);
+  c.lineTo(R, RIM_Y - 60);
   c.closePath();
   c.clip();
 
-  const soften = melt.meltedFrac;
-  // back depth layer first, then front
-  for (const depth of [1, 0]) {
-    for (let i = 0; i < N; i++) {
-      const slot = slotOf(i);
-      if (slot.depth !== depth) continue;
-      let by = cubeBottomY(i);
-      let sMul = 1;
-      // drop-in animation for the newest cube
-      if (dropAnim && dropAnim.idx === i) {
-        const age = t - dropAnim.start;
-        if (age < 0.5) {
-          const f = age / 0.5;
-          by = (RIM_Y - 130) + (by - (RIM_Y - 130)) * f * f;   // gravity fall
-        } else if (age < 1.1) {
-          by -= 10 * Math.exp(-(age - 0.5) * 7) * Math.abs(Math.sin((age - 0.5) * 16));
-        } else {
-          dropAnim = null;
-        }
-      }
-      const s = CUBE * Math.sqrt(1 - melt.p[i]) * (depth ? 0.86 : 1);
-      const depthUp = depth ? ry * 0.75 : 0;
-      drawCube3D(c, cubeX(i), by - depthUp, s * sMul, melt.p[i], seedFor(i), t, soften, depth ? 0.62 : 1);
-    }
-  }
+  const soften = m.meltedFrac || 0;
+  const ordered = [...simCubes].sort((a, b) => b.z - a.z);
+  for (const cu of ordered) drawIce(c, cu, t, soften, waterY);
 
-  // falling melt droplets
   c.fillStyle = 'rgba(200, 230, 250, 0.7)';
   for (const dp of droplets) {
     c.beginPath();
@@ -544,7 +693,7 @@ function draw(now) {
   }
 
   /* ---- water (over cubes -> submerged parts get tinted) ---- */
-  if (melt.waterH > 0.5) {
+  if ((m.waterH || 0) > 0.5) {
     const wg = c.createLinearGradient(0, waterY, 0, FLOOR_Y);
     wg.addColorStop(0, 'rgba(110, 175, 225, 0.36)');
     wg.addColorStop(1, 'rgba(45, 95, 155, 0.48)');
@@ -558,7 +707,6 @@ function draw(now) {
     c.closePath();
     c.fill();
 
-    // water surface ellipse, gently breathing
     const surfRy = ry * (1 + 0.045 * Math.sin(t * 1.2));
     c.fillStyle = 'rgba(160, 210, 240, 0.22)';
     ellipse(c, 0, waterY, R, surfRy);
@@ -567,17 +715,15 @@ function draw(now) {
     c.lineWidth = 1.2;
     ellipse(c, 0, waterY, R, surfRy);
     c.stroke();
-    // brighter back arc of the surface (light from above)
     c.strokeStyle = 'rgba(235, 250, 255, 0.35)';
     c.beginPath();
     c.ellipse(0, waterY, R * 0.97, surfRy * 0.9, 0, Math.PI * 1.1, Math.PI * 1.9);
     c.stroke();
 
-    // ripple rings on the surface
     for (const rp of rings) {
       const age = t - rp.start;
       const f = age / 1.8;
-      const rr = (rp.big ? 14 : 6) + f * R * 0.8;
+      const rr = 6 + f * R * 0.8;
       c.strokeStyle = `rgba(220, 245, 255, ${0.4 * (1 - f)})`;
       c.lineWidth = 1;
       c.beginPath();
@@ -585,19 +731,17 @@ function draw(now) {
       c.stroke();
     }
 
-    // soft caustic blobs in the body
     c.save();
     c.globalAlpha = 0.05;
     c.fillStyle = '#cfeaff';
     for (let i = 0; i < 3; i++) {
       const bx = (i - 1) * R * 0.55 + Math.sin(t * 0.3 + i * 2) * 12;
       c.beginPath();
-      c.ellipse(bx, (waterY + FLOOR_Y) / 2, 16, Math.max(3, melt.waterH * 0.12), 0.1, 0, Math.PI * 2);
+      c.ellipse(bx, (waterY + FLOOR_Y) / 2, 16, Math.max(3, (m.waterH || 0) * 0.12), 0.1, 0, Math.PI * 2);
       c.fill();
     }
     c.restore();
 
-    // bubbles
     c.strokeStyle = 'rgba(220, 245, 255, 0.4)';
     c.lineWidth = 0.7;
     for (const b of bubbles) {
@@ -609,7 +753,6 @@ function draw(now) {
   c.restore(); // jar clip
 
   /* ---- glass front ---- */
-  // walls
   c.strokeStyle = 'rgba(190, 220, 245, 0.5)';
   c.lineWidth = 2.2;
   c.beginPath(); c.moveTo(-R, RIM_Y); c.lineTo(-R, FLOOR_Y); c.stroke();
@@ -618,7 +761,6 @@ function draw(now) {
   c.lineWidth = 5.5;
   c.beginPath(); c.moveTo(-R, RIM_Y); c.lineTo(-R, FLOOR_Y); c.stroke();
   c.beginPath(); c.moveTo(R, RIM_Y); c.lineTo(R, FLOOR_Y); c.stroke();
-  // bottom front arc (thick glass base)
   c.strokeStyle = 'rgba(190, 220, 245, 0.55)';
   c.lineWidth = 2.2;
   c.beginPath();
@@ -629,7 +771,6 @@ function draw(now) {
   c.beginPath();
   c.ellipse(0, FLOOR_Y + 5, R, ry, 0, 0.15, Math.PI - 0.15);
   c.stroke();
-  // rim ellipse (mouth)
   c.strokeStyle = 'rgba(210, 235, 255, 0.55)';
   c.lineWidth = 1.8;
   ellipse(c, 0, RIM_Y, R, ry);
@@ -639,7 +780,6 @@ function draw(now) {
   ellipse(c, 0, RIM_Y, R + 3, ry + 1.5);
   c.stroke();
 
-  // vertical speculars
   c.fillStyle = 'rgba(255, 255, 255, 0.05)';
   c.beginPath();
   c.roundRect(-R + 10, RIM_Y + 36, 6, JAR_H * 0.5, 3);
@@ -648,9 +788,8 @@ function draw(now) {
   c.roundRect(R - 16, RIM_Y + 60, 3.5, JAR_H * 0.36, 2);
   c.fill();
 
-  // condensation dots (static, seeded)
   c.fillStyle = 'rgba(220, 240, 255, 0.13)';
-  const crng = mulberry32(777);
+  const crng = (() => { let a = 777; return () => { a = (a * 1103515245 + 12345) & 0x7fffffff; return a / 0x7fffffff; }; })();
   for (let i = 0; i < 26; i++) {
     const cx = (crng() * 2 - 1) * (R - 8);
     const cy = RIM_Y + 40 + crng() * (JAR_H - 70);
@@ -659,15 +798,14 @@ function draw(now) {
     c.fill();
   }
 
-  /* ---- lid (lifts open when adding ice) ---- */
-  const lidTarget = dropAnim && (t - dropAnim.start) < 0.7 ? 1 : 0;
+  /* ---- lid ---- */
+  const lidTarget = t < dropAnimUntil ? 1 : 0;
   lidLift += (lidTarget - lidLift) * 0.16;
   const ly = RIM_Y - 8 - lidLift * 36;
   c.save();
   c.translate(lidLift * 14, ly);
   c.rotate(-lidLift * 0.05);
   const LR = R + 9;
-  // side band of the lid
   const woodSide = c.createLinearGradient(-LR, 0, LR, 0);
   woodSide.addColorStop(0, '#7a5638');
   woodSide.addColorStop(0.5, '#a8794e');
@@ -681,7 +819,6 @@ function draw(now) {
   c.ellipse(0, -10, LR, LR * K, 0, 0, Math.PI, true);
   c.closePath();
   c.fill();
-  // top of the lid
   const woodTop = c.createRadialGradient(-LR * 0.25, -10 - LR * K * 0.3, 4, 0, -10, LR);
   woodTop.addColorStop(0, '#c79a68');
   woodTop.addColorStop(0.65, '#a0714a');
@@ -689,19 +826,16 @@ function draw(now) {
   c.fillStyle = woodTop;
   ellipse(c, 0, -10, LR, LR * K);
   c.fill();
-  // subtle wood grain rings
   c.strokeStyle = 'rgba(90, 60, 38, 0.35)';
   c.lineWidth = 0.8;
   for (const f of [0.72, 0.45]) {
     ellipse(c, 0, -10, LR * f, LR * K * f);
     c.stroke();
   }
-  // brass rim line
   c.strokeStyle = 'rgba(222, 186, 120, 0.6)';
   c.lineWidth = 1.4;
   ellipse(c, 0, -10, LR * 0.94, LR * K * 0.94);
   c.stroke();
-  // knob
   const knobY = -10 - LR * K - 7;
   const knob = c.createRadialGradient(-2, knobY - 3, 1, 0, knobY, 9);
   knob.addColorStop(0, '#f4dfae');
@@ -740,9 +874,9 @@ const el = {
 function fmtTime(ms) {
   const totalSec = Math.max(0, Math.ceil(ms / 1000));
   const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
+  const mnt = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
-  const mm = String(m).padStart(2, '0');
+  const mm = String(mnt).padStart(2, '0');
   const ss = String(s).padStart(2, '0');
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
@@ -777,8 +911,7 @@ function updateReadout() {
     el.cubeInfo.textContent = 'ぜんぶ溶けました';
     document.title = '✅ 氷が溶けるまで勉強する';
   } else {
-    const melt = meltState(Math.min(elapsedMs(), state.totalMs), state.totalMs, sessionCubes());
-    el.cubeInfo.textContent = `のこり 氷${melt.cubesLeft}個`;
+    el.cubeInfo.textContent = `のこり 氷${meltInfo().cubesLeft}個`;
     const mark = state.status === 'paused' ? '⏸ ' : '';
     document.title = prefs.showTime
       ? `${mark}${fmtTime(remaining)} | 氷が溶けるまで`
@@ -790,8 +923,8 @@ function addCube() {
   if (state.status !== 'idle' || prefs.cubes >= MAX_CUBES) return;
   ensureAudioCtx();
   prefs.cubes++;
-  dropAnim = { idx: prefs.cubes - 1, start: performance.now() / 1000 };
-  playClink();
+  spawnCube(true);
+  dropAnimUntil = performance.now() / 1000 + 0.7;
   save();
   syncUI();
 }
@@ -799,7 +932,7 @@ function addCube() {
 function removeCube() {
   if (state.status !== 'idle' || prefs.cubes < 1) return;
   prefs.cubes--;
-  dropAnim = null;
+  removeTopmost();
   save();
   syncUI();
 }
@@ -809,7 +942,7 @@ el.removeBtn.addEventListener('click', removeCube);
 canvas.addEventListener('click', () => { if (state.status === 'idle') addCube(); });
 
 el.startBtn.addEventListener('click', () => {
-  ensureAudioCtx();               // user gesture: unlock audio
+  ensureAudioCtx();
   if (prefs.rain) setRain(true);
   startSession();
 });
@@ -858,7 +991,6 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-// 1s heartbeat: catches completion while the tab is hidden (rAF is asleep)
 setInterval(() => {
   if (state.status === 'running') {
     if (elapsedMs() >= state.totalMs) completeSession(false);
@@ -873,6 +1005,7 @@ window.addEventListener('pagehide', save);
 /* ================= INIT ================= */
 
 restore();
+rebuildSim();
 syncUI();
 if (prefs.rain && state.status === 'running') {
   const resumeRain = () => { setRain(true); document.removeEventListener('click', resumeRain); };
@@ -880,7 +1013,7 @@ if (prefs.rain && state.status === 'running') {
 }
 requestAnimationFrame(frame);
 
-// expose pure functions for console spot-checks
-window.iceStudy = { meltState, slotOf, CUBE_MINUTES, MAX_CUBES };
+// expose internals for console spot-checks
+window.iceStudy = { meltInfo, simCubes: () => simCubes, CUBE_MINUTES, MAX_CUBES };
 
 })();
